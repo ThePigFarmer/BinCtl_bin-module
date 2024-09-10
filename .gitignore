@@ -1,0 +1,6 @@
+.cache
+.ccls
+compile_commands.json
+build
+sdkconfig
+sdkconfig.*
