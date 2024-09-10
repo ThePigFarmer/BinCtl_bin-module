@@ -1,0 +1,4 @@
+#+title: Readme
+
+* BinCtl bin module
+This is the code for the microcontrollers on the bins in the BinCtl system.
