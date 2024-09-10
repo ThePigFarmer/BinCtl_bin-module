@@ -2,3 +2,9 @@
 
 * BinCtl bin module
 This is the code for the microcontrollers on the bins in the BinCtl system.
+* Still under heavy development
+Yes, not at all useable yet. Not even remotely.
+* What is this?
+This is an http webserver running on a esp32, responding to http requests with the id and weight of the bin.
+* Why
+If you have many feed bins, it is a royal pain to have to climb them to see how much feed is in them. Also, if you buy bin scales and there controllers, they are expensive, and not flexible. This whole project is for personal use.
