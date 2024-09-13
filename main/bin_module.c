@@ -168,8 +168,8 @@ void get_bin_data_as_json_str(char *buffer, size_t size)
     free(json_string);
 }
 
-// handler for "/test"
-esp_err_t test_handler(httpd_req_t *req)
+// handler for "/data"
+esp_err_t data_handler(httpd_req_t *req)
 {
     char response_buffer[JSON_STRING_LENGTH];
     get_bin_data_as_json_str(response_buffer, sizeof(response_buffer));
@@ -181,10 +181,10 @@ esp_err_t test_handler(httpd_req_t *req)
     return httpd_resp_send(req, response_buffer, HTTPD_RESP_USE_STRLEN);
 }
 
-httpd_uri_t uri_test = {
-    .uri = "/test",
+httpd_uri_t uri_data = {
+    .uri = "/data",
     .method = HTTP_GET,
-    .handler = test_handler,
+    .handler = data_handler,
     .user_ctx = NULL
 };
 
@@ -210,7 +210,7 @@ httpd_handle_t setup_server(void)
 
     if (httpd_start(&server, &config) == ESP_OK)
     {
-        httpd_register_uri_handler(server, &uri_test);
+        httpd_register_uri_handler(server, &uri_data);
         httpd_register_uri_handler(server, &uri_windows_users_not_allowed);
     }
 
