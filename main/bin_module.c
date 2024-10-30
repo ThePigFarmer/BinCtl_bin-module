@@ -1,20 +1,29 @@
 #include <stdio.h>
+
+
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include <esp_http_server.h>
+
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "freertos/event_groups.h"
-#include "driver/gpio.h"
+#include <esp_http_server.h>
+#include "nvs_flash.h"
+
 #include <lwip/sockets.h>
 #include <lwip/sys.h>
 #include <lwip/api.h>
-#include "nvs_flash.h"
-#include "cJSON.h"
 
-// set this on each bin:
-#define BIN_ID "1b"
+#include "portmacro.h"
+
+#include "driver/gpio.h"
+#include "cJSON.h"
+#include <hx711.h>
+#include <button.h> // every project needs one
+
+// create the debug tag
+static const char *TAG = "bin-module";
 
 
 #define EXAMPLE_WIFI_SSID CONFIG_EXAMPLE_WIFI_SSID
@@ -34,10 +43,25 @@
 #define EXAMPLE_RESOLVE_DOMAIN        CONFIG_EXAMPLE_STATIC_RESOLVE_DOMAIN
 #endif
 
-#define JSON_STRING_LENGTH 30
+#define JSON_STRING_LENGTH 30 // json response length is easy and fun as long as we have it big enough
+
 #define LED_PIN 2
 
-static const char *TAG = "bin_module"; // TAG for debug
+#define HX711_AVG_TIMES 10
+#define HX711_DOUT_GPIO 19
+#define HX711_PD_SCK_GPIO 18
+
+hx711_t hx711_dev = {.dout = HX711_DOUT_GPIO,
+                         .pd_sck = HX711_PD_SCK_GPIO,
+                         .gain = HX711_GAIN_A_64};
+
+void blink_led(gpio_num_t pin, uint16_t on_delay)
+{
+   gpio_set_level(pin, 1);
+   vTaskDelay(on_delay /portTICK_PERIOD_MS);
+   gpio_set_level(pin, 0);
+}
+
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
@@ -51,7 +75,7 @@ static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 
 
-static esp_err_t example_set_dns_server(esp_netif_t *netif, uint32_t addr, esp_netif_dns_type_t type)
+static esp_err_t network_set_dns_server(esp_netif_t *netif, uint32_t addr, esp_netif_dns_type_t type)
 {
     if (addr && (addr != IPADDR_NONE)) {
         esp_netif_dns_info_t dns;
@@ -62,7 +86,7 @@ static esp_err_t example_set_dns_server(esp_netif_t *netif, uint32_t addr, esp_n
     return ESP_OK;
 }
 
-static void example_set_static_ip(esp_netif_t *netif)
+static void network_set_static_ip(esp_netif_t *netif)
 {
     if (esp_netif_dhcpc_stop(netif) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to stop dhcp client");
@@ -78,8 +102,8 @@ static void example_set_static_ip(esp_netif_t *netif)
         return;
     }
     ESP_LOGD(TAG, "Success to set static ip: %s, netmask: %s, gw: %s", EXAMPLE_STATIC_IP_ADDR, EXAMPLE_STATIC_NETMASK_ADDR, EXAMPLE_STATIC_GW_ADDR);
-    ESP_ERROR_CHECK(example_set_dns_server(netif, ipaddr_addr(EXAMPLE_MAIN_DNS_SERVER), ESP_NETIF_DNS_MAIN));
-    ESP_ERROR_CHECK(example_set_dns_server(netif, ipaddr_addr(EXAMPLE_BACKUP_DNS_SERVER), ESP_NETIF_DNS_BACKUP));
+    ESP_ERROR_CHECK(network_set_dns_server(netif, ipaddr_addr(EXAMPLE_MAIN_DNS_SERVER), ESP_NETIF_DNS_MAIN));
+    ESP_ERROR_CHECK(network_set_dns_server(netif, ipaddr_addr(EXAMPLE_BACKUP_DNS_SERVER), ESP_NETIF_DNS_BACKUP));
 }
 
 static void event_handler(void* arg, esp_event_base_t event_base,
@@ -88,7 +112,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
-        example_set_static_ip(arg);
+        network_set_static_ip(arg);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_retry_num < EXAMPLE_MAXIMUM_RETRY) {
             esp_wifi_connect();
@@ -198,28 +222,45 @@ void network_init_sta(void)
     vEventGroupDelete(s_wifi_event_group);
 }
 
-void get_bin_data_as_json_str(char *buffer, size_t size)
-{
+uint32_t read_bin_weight(void) {
+    // TODO redo this all
+
+    esp_err_t r = hx711_wait(&hx711_dev, 500);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "HX711 Device not found: %d (%s)\n", r,
+                 esp_err_to_name(r));
+        return 0;
+    }
+
+    // get weight here
+    int32_t data;
+    r = hx711_read_average(&hx711_dev, HX711_AVG_TIMES, &data);
+
+    // printf("weight: %u", weight);
+    return data;
+}
+
+void parse_bin_weight_to_json(uint32_t weight, char *buffer, size_t size) {
     cJSON *json = cJSON_CreateObject();
     if (json == NULL) {
         ESP_LOGE(TAG, "cJSON: Failed to create JSON object\n");
         return;
     }
 
-    cJSON_AddStringToObject(json, "id", BIN_ID);
-    cJSON_AddNumberToObject(json, "weight", 6532);
+    cJSON_AddNumberToObject(json, "weight", weight);
 
     char *json_string = cJSON_PrintUnformatted(json);
 
+    // I doubt if this is necessary
     if (json_string == NULL) {
         ESP_LOGE(TAG, "cJSON: Failed to print JSON\n");
         cJSON_Delete(json);
         return;
     }
 
-    printf("JSON output:\n%s\n", json_string);
+    // printf("JSON output:\n%s\n", json_string);
 
-    snprintf(buffer, size, json_string);
+    strncpy(buffer, json_string, size);
 
     cJSON_Delete(json);
     free(json_string);
@@ -228,12 +269,13 @@ void get_bin_data_as_json_str(char *buffer, size_t size)
 // handler for "/data"
 esp_err_t data_handler(httpd_req_t *req)
 {
+    // then get it as json, and stick it in the response_buffer
     char response_buffer[JSON_STRING_LENGTH];
-    get_bin_data_as_json_str(response_buffer, sizeof(response_buffer));
+    parse_bin_weight_to_json(read_bin_weight(), response_buffer, sizeof(response_buffer));
 
     httpd_resp_set_type(req, "application/json");
 
-    gpio_set_level(LED_PIN, 1);
+    blink_led(LED_PIN, 100);
 
     return httpd_resp_send(req, response_buffer, HTTPD_RESP_USE_STRLEN);
 }
@@ -246,16 +288,16 @@ httpd_uri_t uri_data = {
 };
 
 // handler for "/"
-esp_err_t windows_users_not_allowed_handler(httpd_req_t *req)
+esp_err_t status_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_send(req, "error: windows users not allowed: \"/\" : use C:\\\\ instead", HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, "Webserver is working, send request to /data to get weight.\n", HTTPD_RESP_USE_STRLEN);
 }
 
-httpd_uri_t uri_windows_users_not_allowed = {
+httpd_uri_t uri_status = {
     .uri = "/",
     .method = HTTP_GET,
-    .handler = windows_users_not_allowed_handler,
+    .handler = status_handler,
     .user_ctx = NULL
 };
 
@@ -268,17 +310,17 @@ httpd_handle_t setup_server(void)
     if (httpd_start(&server, &config) == ESP_OK)
     {
         httpd_register_uri_handler(server, &uri_data);
-        httpd_register_uri_handler(server, &uri_windows_users_not_allowed);
+        httpd_register_uri_handler(server, &uri_status);
     }
 
     return server;
 }
 
 
-void app_main()
+void app_main(void)
 {
 
-    // Initialize NVS
+    // init NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
@@ -288,12 +330,18 @@ void app_main()
     ESP_ERROR_CHECK(ret);
 
 
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+    // init wifi and network
+    ESP_LOGI(TAG, "init network and wifi (sta)");
     network_init_sta();
 
-    // GPIO initialization
+    // init indicator led
     gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
 
-    ESP_LOGI(TAG, "webserver: started");
+    // init hx711
+    ESP_LOGI(TAG, "init hx711");
+    ESP_ERROR_CHECK(hx711_init(&hx711_dev));
+
+    // init webserver
+    ESP_LOGI(TAG, "init webserver");
     setup_server();
 }
